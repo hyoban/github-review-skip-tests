@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Review: Skip Tests
 // @namespace    https://github.com/hyoban/github-review-skip-tests
-// @version      0.5.0
+// @version      0.6.0
 // @description  PR files/changes pages: auto-marks test and generated files as Viewed. Commit pages: auto-collapses them.
 // @author       hyoban
 // @license      MIT
@@ -143,12 +143,55 @@
     return markAll({ setLabel: t => btn && t && (btn.textContent = t), doneLabel: 'Mark tests viewed' })
   }
 
-  // ---------- PR pages: "view all" button on folders in the file tree ----------
+  // Commit pages: scroll through the page and collapse every file whose path starts with `prefix`.
+  async function collapseAll({ prefix, targets = null, setLabel = () => {}, doneLabel } = {}) {
+    if (running || !COMMIT_PAGE_RE.test(location.pathname)) return
+    running = true
+    setLabel('Collapsing…')
+
+    const isFileToggle = el => el.matches(FILE_TOGGLE_SEL)
+    const done = new Set()
+    let collapsed = 0
+    const allFound = () => targets && [...targets].every(p => done.has(p))
+    const sweep = async () => {
+      for (const el of document.querySelectorAll(FILE_TOGGLE_SEL)) {
+        const path = pathIn(blockOf(el, isFileToggle))
+        if (!path || done.has(path) || !path.startsWith(prefix)) continue
+        done.add(path)
+        if (!el.matches(COLLAPSE_SEL)) continue // already collapsed
+        el.click()
+        collapsed++
+        await sleep(50)
+      }
+    }
+
+    try {
+      const start = scrollY
+      await sweep()
+      for (let y = 0; !allFound() && y <= document.documentElement.scrollHeight; y += innerHeight * 0.8) {
+        scrollTo(0, y)
+        await sleep(300)
+        await sweep()
+      }
+      scrollTo(0, start)
+      console.log('[mark-tests]', `${collapsed} file(s) collapsed under ${prefix}`)
+      setLabel(`✓ ${collapsed} collapsed`)
+      setTimeout(() => setLabel(doneLabel), 3000)
+    } finally {
+      running = false
+    }
+  }
+
+  // ---------- Folder buttons in the file tree ----------
+  // PR pages: "View all" marks every file in the folder as viewed.
+  // Commit pages: "Collapse all" collapses every file in the folder.
   // Tree items carry the full path as their id: folders "web/app", files "web/app/x.ts".
   const FOLDER_BTN_CLASS = 'tm-folder-view-all'
 
   function ensureFolderButtons() {
-    if (!PR_PAGE_RE.test(location.pathname)) return
+    const mode = PR_PAGE_RE.test(location.pathname) ? 'view' : COMMIT_PAGE_RE.test(location.pathname) ? 'collapse' : null
+    if (!mode) return
+    const label = mode === 'view' ? 'View all' : 'Collapse all'
     if (!document.getElementById(`${FOLDER_BTN_CLASS}-style`)) {
       const style = document.createElement('style')
       style.id = `${FOLDER_BTN_CLASS}-style`
@@ -168,14 +211,18 @@
     }
     for (const li of document.querySelectorAll('[role="treeitem"][aria-expanded]')) {
       const content = li.querySelector(':scope > div > [class*="TreeView-item-content"], :scope > div > .PRIVATE_TreeView-item-content')
-      if (!content || content.querySelector(`:scope > .${FOLDER_BTN_CLASS}`)) continue
+      if (!content) continue
+      const existing = content.querySelector(`:scope > .${FOLDER_BTN_CLASS}`)
+      if (existing?.dataset.mode === mode) continue
+      existing?.remove()
       const folder = li.id
       if (!folder) continue
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.className = FOLDER_BTN_CLASS
-      btn.textContent = 'View all'
-      btn.title = `Mark every file in ${folder}/ as viewed`
+      btn.dataset.mode = mode
+      btn.textContent = label
+      btn.title = mode === 'view' ? `Mark every file in ${folder}/ as viewed` : `Collapse every file in ${folder}/`
       // Keep the tree from toggling / navigating when the button is used.
       for (const type of ['mousedown', 'pointerdown', 'keydown'])
         btn.addEventListener(type, e => e.stopPropagation())
@@ -189,12 +236,15 @@
         // A collapsed subfolder hides its files from the tree, so we can't know when we're done early.
         const complete = !li.querySelector('[role="treeitem"][aria-expanded="false"]') && targets.size > 0
         btn.dataset.busy = ''
-        markAll({
-          match: (_, path) => path.startsWith(prefix),
+        const common = {
           targets: complete ? targets : null,
           setLabel: t => t && (btn.textContent = t),
-          doneLabel: 'View all',
-        }).finally(() => delete btn.dataset.busy)
+          doneLabel: label,
+        }
+        const job = mode === 'view'
+          ? markAll({ ...common, match: (_, path) => path.startsWith(prefix) })
+          : collapseAll({ ...common, prefix })
+        job.finally(() => delete btn.dataset.busy)
       })
       content.appendChild(btn)
     }

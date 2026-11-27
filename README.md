@@ -5,6 +5,7 @@ A userscript that gets test files and generated files out of your way while revi
 - **Pull request files/changes pages**: automatically marks test files and generated files as **Viewed** as they render.
 - **Pull request file tree**: hover a folder and click **View all** to mark every file in it as Viewed.
 - **Commit pages** (`/commit/<sha>` and `/pull/<n>/commits/<sha>`): automatically **collapses** test files and generated files.
+- **Commit file tree**: hover a folder and click **Collapse all** to collapse every file in it.
 
 ## Install
 
