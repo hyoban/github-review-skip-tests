@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Review: Skip Tests
 // @namespace    https://github.com/hyoban/github-review-skip-tests
-// @version      0.4.0
+// @version      0.5.0
 // @description  PR files/changes pages: auto-marks test and generated files as Viewed. Commit pages: auto-collapses them.
 // @author       hyoban
 // @license      MIT
@@ -94,23 +94,24 @@
 
   // ---------- PR pages: mark as viewed ----------
 
+  // Scroll through the whole page (so lazily rendered files get handled too) and mark every
+  // file for which `match(el, path)` is true. `targets`, when given, lets it stop early.
   let running = false
-  async function run() {
+  async function markAll({ match = shouldMark, targets = null, setLabel = () => {}, doneLabel } = {}) {
     if (running || !PR_PAGE_RE.test(location.pathname)) return
     running = true
-    const btn = document.getElementById(BTN_ID)
-    const setLabel = t => btn && (btn.textContent = t)
     setLabel('Marking…')
 
     const done = new Set()
     let marked = 0
+    const allFound = () => targets && [...targets].every(p => done.has(p))
     const sweep = async () => {
       for (const el of document.querySelectorAll('input.js-reviewed-checkbox, button')) {
         if (!isViewedToggle(el)) continue
         const path = pathOf(el)
         if (!path || done.has(path)) continue
         done.add(path)
-        if (!shouldMark(el, path)) continue
+        if (!match(el, path)) continue
         if (isChecked(el)) { console.log('[mark-tests] already viewed:', path); continue }
         el.click()
         marked++
@@ -122,19 +123,80 @@
     try {
       const start = scrollY
       await sweep()
-      // Scroll through so lazily rendered files get handled too.
-      for (let y = 0; y <= document.documentElement.scrollHeight; y += innerHeight * 0.8) {
+      for (let y = 0; !allFound() && y <= document.documentElement.scrollHeight; y += innerHeight * 0.8) {
         scrollTo(0, y)
         await sleep(400)
         await sweep()
       }
       scrollTo(0, start)
-      const msg = `${marked} file(s) marked, ${done.size} file(s) seen`
-      console.log('[mark-tests]', msg)
+      const msg = `${marked} file(s) marked`
+      console.log('[mark-tests]', msg, `(${done.size} file(s) seen)`)
       setLabel(`✓ ${msg}`)
-      setTimeout(() => setLabel('Mark tests viewed'), 4000)
+      setTimeout(() => setLabel(doneLabel), 3000)
     } finally {
       running = false
+    }
+  }
+
+  function run() {
+    const btn = document.getElementById(BTN_ID)
+    return markAll({ setLabel: t => btn && t && (btn.textContent = t), doneLabel: 'Mark tests viewed' })
+  }
+
+  // ---------- PR pages: "view all" button on folders in the file tree ----------
+  // Tree items carry the full path as their id: folders "web/app", files "web/app/x.ts".
+  const FOLDER_BTN_CLASS = 'tm-folder-view-all'
+
+  function ensureFolderButtons() {
+    if (!PR_PAGE_RE.test(location.pathname)) return
+    if (!document.getElementById(`${FOLDER_BTN_CLASS}-style`)) {
+      const style = document.createElement('style')
+      style.id = `${FOLDER_BTN_CLASS}-style`
+      style.textContent = `
+        .${FOLDER_BTN_CLASS} {
+          margin-left: auto; flex-shrink: 0; padding: 0 6px; height: 20px; line-height: 18px;
+          border: 1px solid var(--borderColor-default, #d1d9e0); border-radius: 6px;
+          background: var(--bgColor-default, #fff); color: var(--fgColor-muted, #59636e);
+          font: 500 11px -apple-system, sans-serif; cursor: pointer; visibility: hidden;
+        }
+        [role="treeitem"] > div:hover > * > .${FOLDER_BTN_CLASS},
+        [role="treeitem"] > div:focus-within > * > .${FOLDER_BTN_CLASS},
+        .${FOLDER_BTN_CLASS}[data-busy] { visibility: visible; }
+        .${FOLDER_BTN_CLASS}:hover { color: var(--fgColor-default, #1f2328); }
+      `
+      document.head.appendChild(style)
+    }
+    for (const li of document.querySelectorAll('[role="treeitem"][aria-expanded]')) {
+      const content = li.querySelector(':scope > div > [class*="TreeView-item-content"], :scope > div > .PRIVATE_TreeView-item-content')
+      if (!content || content.querySelector(`:scope > .${FOLDER_BTN_CLASS}`)) continue
+      const folder = li.id
+      if (!folder) continue
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = FOLDER_BTN_CLASS
+      btn.textContent = 'View all'
+      btn.title = `Mark every file in ${folder}/ as viewed`
+      // Keep the tree from toggling / navigating when the button is used.
+      for (const type of ['mousedown', 'pointerdown', 'keydown'])
+        btn.addEventListener(type, e => e.stopPropagation())
+      btn.addEventListener('click', e => {
+        e.preventDefault()
+        e.stopPropagation()
+        const prefix = `${folder}/`
+        const targets = new Set(
+          [...li.querySelectorAll('[role="treeitem"]:not([aria-expanded])')].map(f => f.id).filter(id => id.startsWith(prefix)),
+        )
+        // A collapsed subfolder hides its files from the tree, so we can't know when we're done early.
+        const complete = !li.querySelector('[role="treeitem"][aria-expanded="false"]') && targets.size > 0
+        btn.dataset.busy = ''
+        markAll({
+          match: (_, path) => path.startsWith(prefix),
+          targets: complete ? targets : null,
+          setLabel: t => t && (btn.textContent = t),
+          doneLabel: 'View all',
+        }).finally(() => delete btn.dataset.busy)
+      })
+      content.appendChild(btn)
     }
   }
 
@@ -207,7 +269,7 @@
   }
 
   let timer
-  const schedule = () => { clearTimeout(timer); timer = setTimeout(autoSweep, 500) }
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(() => { ensureFolderButtons(); autoSweep() }, 500) }
   new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true })
 
   GM_registerMenuCommand('Mark test files as viewed (scroll whole page)', run)
@@ -217,5 +279,5 @@
   schedule()
   document.addEventListener('turbo:load', () => { ensureButton(); schedule() })
   window.addEventListener('popstate', ensureButton)
-  setInterval(ensureButton, 1000)
+  setInterval(() => { ensureButton(); ensureFolderButtons() }, 1000)
 })()
